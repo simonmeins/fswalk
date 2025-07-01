@@ -81,7 +81,7 @@ fn main() -> Result<()> {
                 OR files.modified <> excluded.modified 
                 OR files.plen <> excluded.plen 
                 OR files.flen <> excluded.flen 
-                OR files.timestamp <> excluded.timestamp",
+                OR files.timestamp <> excluded.timestamp;",
         )?;
 
         let timestamp = std::time::SystemTime::now()
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/Documents") {
+        for dir_entry in WalkDir::new("/home/simon/Documents/Hallo") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                     let flen = entry.file_name.len();
 
                     insert.execute(params![
-                        hash,
+                        hash.to_string(),
                         path.to_str(),
                         size,
                         created,
