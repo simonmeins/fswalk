@@ -1,0 +1,9 @@
+[package]
+name = "fswalk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jwalk = "0.8.1"
+rusqlite = { version = "0.36.0", features = ["bundled"] }
+xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3", "std"] }
