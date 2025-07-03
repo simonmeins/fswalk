@@ -34,6 +34,7 @@ fn create_database(connection: &Connection) -> Result<()> {
             plen INTEGER NOT NULL,
             flen INTEGER NOT NULL,
             timestamp INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
             new INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (hash, path)
         );",
@@ -71,22 +72,23 @@ fn main() -> Result<()> {
         let tx = db.transaction()?;
 
         let mut insert = tx.prepare(
-            "INSERT INTO files (hash, path, size, created, modified, plen, flen, timestamp, new) 
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) 
+            "INSERT INTO files (hash, path, size, created, modified, plen, flen, timestamp, last_seen, new) 
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) 
             ON CONFLICT(hash, path) DO UPDATE SET
                 size = excluded.size,
                 created = excluded.created,
                 modified = excluded.modified,
                 plen = excluded.plen,
                 flen = excluded.flen,
-                timestamp = excluded.timestamp,
+                last_seen = excluded.last_seen,
                 new = 0
             WHERE 
                 size <> excluded.size OR 
                 created <> excluded.created OR 
                 modified <> excluded.modified OR 
                 plen <> excluded.plen OR 
-                flen <> excluded.flen;"
+                flen <> excluded.flen OR 
+                last_seen <> excluded.last_seen;"
         )?;
 
         tx.execute("UPDATE files SET new = 0", ())?;
@@ -96,7 +98,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/Documents") {
+        for dir_entry in WalkDir::new("/home/simon/Documents/Hallo") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -134,6 +136,7 @@ fn main() -> Result<()> {
                         modified,
                         plen,
                         flen,
+                        timestamp,
                         timestamp,
                         1
                     ])?;
