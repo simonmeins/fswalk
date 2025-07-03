@@ -34,6 +34,7 @@ fn create_database(connection: &Connection) -> Result<()> {
             plen INTEGER NOT NULL,
             flen INTEGER NOT NULL,
             timestamp INTEGER NOT NULL,
+            new INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (hash, path)
         );",
         (),
@@ -57,6 +58,9 @@ fn create_index(connection: &Connection) {
     connection
         .execute("CREATE INDEX IF NOT EXISTS idx_path ON files(path)", ())
         .expect("INDEX ERROR ON PATH");
+    connection
+        .execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON files(timestamp)", ())
+        .expect("INDEX ERROR ON TIMESTAMP");
 }
 
 fn main() -> Result<()> {
@@ -67,22 +71,25 @@ fn main() -> Result<()> {
         let tx = db.transaction()?;
 
         let mut insert = tx.prepare(
-            "INSERT INTO files (hash, path, size, created, modified, plen, flen, timestamp) 
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) 
-            ON CONFLICT(hash, path) DO UPDATE SET 
+            "INSERT INTO files (hash, path, size, created, modified, plen, flen, timestamp, new) 
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) 
+            ON CONFLICT(hash, path) DO UPDATE SET
                 size = excluded.size,
                 created = excluded.created,
                 modified = excluded.modified,
                 plen = excluded.plen,
                 flen = excluded.flen,
-                timestamp = excluded.timestamp
-            WHERE files.size <> excluded.size 
-                OR files.created <> excluded.created 
-                OR files.modified <> excluded.modified 
-                OR files.plen <> excluded.plen 
-                OR files.flen <> excluded.flen 
-                OR files.timestamp <> excluded.timestamp;"
+                timestamp = excluded.timestamp,
+                new = 0
+            WHERE 
+                size <> excluded.size OR 
+                created <> excluded.created OR 
+                modified <> excluded.modified OR 
+                plen <> excluded.plen OR 
+                flen <> excluded.flen;"
         )?;
+
+        tx.execute("UPDATE files SET new = 0", ())?;
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -127,13 +134,13 @@ fn main() -> Result<()> {
                         modified,
                         plen,
                         flen,
-                        timestamp
+                        timestamp,
+                        1
                     ])?;
                 }
                 Err(_) => (),
             };
         }
-
         drop(insert);
         tx.commit()?;
     }
