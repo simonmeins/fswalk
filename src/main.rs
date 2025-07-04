@@ -1,17 +1,22 @@
 use jwalk::WalkDir;
 use rusqlite::{Connection, Result, params};
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
+use tabled::{
+    settings::{object::{Rows, Segment}, Alignment, Format, Modify, Style}, Table, Tabled
+};
 use xxhash_rust::xxh3::xxh3_64;
 
-#[derive(Debug)]
-struct Datei<'a> {
-    hash: u64,
-    path: &'a str,
+#[derive(Debug, Tabled)]
+struct Datei {
+    path: String,
     size: i64,
     created: i64,
     modified: i64,
     plen: i64,
     flen: i64,
-    timestamp: i64,
 }
 
 fn create_database(connection: &Connection) -> Result<()> {
@@ -44,14 +49,6 @@ fn create_database(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn table_is_empty(connection: &Connection, table: &str) -> Result<bool> {
-    Ok(connection.query_row::<i64, _, _>(
-        &format!("SELECT EXISTS(SELECT 1 FROM {} LIMIT 1)", table),
-        [],
-        |row| row.get(0),
-    )? == 0)
-}
-
 fn create_index(connection: &Connection) {
     connection
         .execute("CREATE INDEX IF NOT EXISTS idx_hash ON files(hash)", ())
@@ -72,15 +69,46 @@ fn create_index(connection: &Connection) {
         )
         .expect("INDEX ERROR ON LAST_SEEN");
     connection
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_new ON files(new)",
-            (),
-        )
+        .execute("CREATE INDEX IF NOT EXISTS idx_new ON files(new)", ())
         .expect("INDEX ERROR ON NEW");
 }
 
-fn write_to_file(connection: &Connection, path: &str) {
+fn write_to_file(connection: &mut Connection, path: &str) -> Result<()> {
+    let tx = connection.transaction()?;
 
+    {
+        let mut query_new = tx.prepare(
+            "SELECT hash, path, size, created, modified, plen, flen FROM files WHERE new = 1;",
+        )?;
+        let mut query_modified = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE timestamp = ?1 AND new = 0")?;
+        let mut query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1")?;
+
+        let file: File = File::create(path).expect("Error opening the output file");
+        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
+
+        let new_rows = query_new.query_map([], |row| {
+            Ok(Datei {
+                path: row.get::<_, String>("path")?,
+                size: row.get::<_, i64>("size")?,
+                created: row.get::<_, i64>("created")?,
+                modified: row.get::<_, i64>("modified")?,
+                plen: row.get::<_, i64>("plen")?,
+                flen: row.get::<_, i64>("flen")?,
+            })
+        })?;
+
+        let mut table = Table::new(new_rows.map(Result::unwrap));
+        table
+            .with(Style::psql())
+            .with(Modify::new(Rows::first()).with(Format::content(|s| s.to_uppercase())));
+        
+        writeln!(writer, "{}", table).expect("ERROR");
+
+        writer.flush().expect("Writer flush error");
+    }
+    tx.commit()?;
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -116,7 +144,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon") {
+        for dir_entry in WalkDir::new("/home/simon/") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -162,13 +190,12 @@ fn main() -> Result<()> {
                 Err(_) => (),
             };
         }
+
         drop(insert);
         tx.commit()?;
 
-        let mut query_new = db.prepare("SELECT path, size, created, modified,  FROM files WHERE new = 1;")?;
-        let mut query_modified = db.prepare("SELECT path FROM files WHERE timestamp = ?1 AND new = 0")?;
-        let mut query_deleted = db.prepare("SELECT path FROM files WHERE last_seen <> ?1")?;
-        
+        write_to_file(&mut db, "output.txt")?;
+
         db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
 
