@@ -79,6 +79,10 @@ fn create_index(connection: &Connection) {
         .expect("INDEX ERROR ON NEW");
 }
 
+fn write_to_file(connection: &Connection, path: &str) {
+
+}
+
 fn main() -> Result<()> {
     let mut db = Connection::open("files.db")?;
     create_database(&db)?;
@@ -86,7 +90,7 @@ fn main() -> Result<()> {
     {
         let tx = db.transaction()?;
 
-        let mut insert = tx.prepare(
+        let mut insert = tx.prepare_cached(
             "INSERT INTO files (hash, path, size, created, modified, plen, flen, timestamp, last_seen, new) 
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) 
             ON CONFLICT(hash, path) DO UPDATE SET
@@ -112,7 +116,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/") {
+        for dir_entry in WalkDir::new("/home/simon") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -161,26 +165,10 @@ fn main() -> Result<()> {
         drop(insert);
         tx.commit()?;
 
-        let mut query_new = db.prepare("SELECT path FROM files WHERE new = 1;")?;
+        let mut query_new = db.prepare("SELECT path, size, created, modified,  FROM files WHERE new = 1;")?;
         let mut query_modified = db.prepare("SELECT path FROM files WHERE timestamp = ?1 AND new = 0")?;
         let mut query_deleted = db.prepare("SELECT path FROM files WHERE last_seen <> ?1")?;
-
-        let new_rows = query_new.query_map([], |row| Ok(row.get::<_, String>("path")?))?;
-        let modified_rows = query_modified.query_map([timestamp], |row| Ok(row.get::<_, String>("path")?))?;
-        let deleted_rows = query_deleted.query_map([timestamp], |row| Ok(row.get::<_, String>("path")?))?;
-
-        /*for new_row in new_rows {
-            println!("NEW: {}", new_row?);
-        }
-
-        for modified_row in modified_rows {
-            println!("MODIFIED: {}", modified_row?);
-        }
-
-        for deleted_row in deleted_rows {
-            println!("DELETED: {}", deleted_row?);
-        }*/
-
+        
         db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
 
