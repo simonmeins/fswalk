@@ -60,8 +60,23 @@ fn create_index(connection: &Connection) {
         .execute("CREATE INDEX IF NOT EXISTS idx_path ON files(path)", ())
         .expect("INDEX ERROR ON PATH");
     connection
-        .execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON files(timestamp)", ())
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_timestamp ON files(timestamp)",
+            (),
+        )
         .expect("INDEX ERROR ON TIMESTAMP");
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_last_seen ON files(last_seen)",
+            (),
+        )
+        .expect("INDEX ERROR ON LAST_SEEN");
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_new ON files(new)",
+            (),
+        )
+        .expect("INDEX ERROR ON NEW");
 }
 
 fn main() -> Result<()> {
@@ -81,14 +96,13 @@ fn main() -> Result<()> {
                 plen = excluded.plen,
                 flen = excluded.flen,
                 last_seen = excluded.last_seen,
-                new = 0
-            WHERE 
-                size <> excluded.size OR 
-                created <> excluded.created OR 
-                modified <> excluded.modified OR 
-                plen <> excluded.plen OR 
-                flen <> excluded.flen OR 
-                last_seen <> excluded.last_seen;"
+                timestamp = CASE
+                                WHEN size <> excluded.size 
+                                OR modified <> excluded.modified
+                                THEN excluded.timestamp
+                                ELSE timestamp
+                            END,
+                new = 0"
         )?;
 
         tx.execute("UPDATE files SET new = 0", ())?;
@@ -98,7 +112,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/Documents/Hallo") {
+        for dir_entry in WalkDir::new("/home/simon/") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -146,6 +160,28 @@ fn main() -> Result<()> {
         }
         drop(insert);
         tx.commit()?;
+
+        let mut query_new = db.prepare("SELECT path FROM files WHERE new = 1;")?;
+        let mut query_modified = db.prepare("SELECT path FROM files WHERE timestamp = ?1 AND new = 0")?;
+        let mut query_deleted = db.prepare("SELECT path FROM files WHERE last_seen <> ?1")?;
+
+        let new_rows = query_new.query_map([], |row| Ok(row.get::<_, String>("path")?))?;
+        let modified_rows = query_modified.query_map([timestamp], |row| Ok(row.get::<_, String>("path")?))?;
+        let deleted_rows = query_deleted.query_map([timestamp], |row| Ok(row.get::<_, String>("path")?))?;
+
+        /*for new_row in new_rows {
+            println!("NEW: {}", new_row?);
+        }
+
+        for modified_row in modified_rows {
+            println!("MODIFIED: {}", modified_row?);
+        }
+
+        for deleted_row in deleted_rows {
+            println!("DELETED: {}", deleted_row?);
+        }*/
+
+        db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
 
     create_index(&db);
