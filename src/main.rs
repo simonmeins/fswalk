@@ -74,6 +74,7 @@ fn create_index(connection: &Connection) {
 }
 
 fn write_to_file(connection: &mut Connection, path: &str) -> Result<()> {
+
     let tx = connection.transaction()?;
 
     {
@@ -84,7 +85,7 @@ fn write_to_file(connection: &mut Connection, path: &str) -> Result<()> {
         let mut query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1")?;
 
         let file: File = File::create(path).expect("Error opening the output file");
-        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
+        let mut writer = BufWriter::with_capacity(32 * 1024 * 1024, file);
 
         let new_rows = query_new.query_map([], |row| {
             Ok(Datei {
@@ -93,7 +94,7 @@ fn write_to_file(connection: &mut Connection, path: &str) -> Result<()> {
                 created: row.get::<_, i64>("created")?,
                 modified: row.get::<_, i64>("modified")?,
                 plen: row.get::<_, i64>("plen")?,
-                flen: row.get::<_, i64>("flen")?,
+                flen: row.get::<_, i64>("flen")?
             })
         })?;
 
@@ -144,7 +145,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/") {
+        for dir_entry in WalkDir::new("/home/simon/Documents") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -203,3 +204,4 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
