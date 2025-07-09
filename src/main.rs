@@ -1,11 +1,17 @@
 use jwalk::WalkDir;
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, Result, Row, params};
 use std::{
     fs::File,
     io::{BufWriter, Write},
+    ops::Deref,
 };
 use tabled::{
-    settings::{object::{Rows, Segment}, Alignment, Format, Modify, Style}, Table, Tabled
+    Table, Tabled,
+    builder::Builder,
+    settings::{
+        Alignment, Format, Modify, Style,
+        object::{Rows, Segment},
+    },
 };
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -73,21 +79,65 @@ fn create_index(connection: &Connection) {
         .expect("INDEX ERROR ON NEW");
 }
 
-fn write_to_file(connection: &mut Connection, path: &str) -> Result<()> {
+fn create_file(path: &str) -> std::io::Result<BufWriter<File>> {
+    let file = File::create(path)?;
+    Ok(BufWriter::with_capacity(32 * 1024 * 1024, file))
+}
 
+fn process_row(row: &Row) -> Datei {
+    Datei {
+        path: row.get_unwrap::<_, String>("path"),
+        size: row.get_unwrap::<_, i64>("size"),
+        created: row.get_unwrap::<_, i64>("created"),
+        modified: row.get_unwrap::<_, i64>("modified"),
+        plen: row.get_unwrap::<_, i64>("plen"),
+        flen: row.get_unwrap::<_, i64>("flen"),
+    }
+}
+
+fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Result<()> {
     let tx = connection.transaction()?;
 
     {
+        let mut query_new_count = tx.prepare("SELECT COUNT(*) from files WHERE new = 1;")?;
+        let mut query_modified_count =
+            tx.prepare("SELECT COUNT(*) FROM files WHERE timestamp = ?1 AND new = 0;")?;
+        let mut query_deleted_count =
+            tx.prepare("SELECT COUNT(*) FROM files WHERE last_seen <> ?1")?;
+
         let mut query_new = tx.prepare(
             "SELECT hash, path, size, created, modified, plen, flen FROM files WHERE new = 1;",
         )?;
-        let mut query_modified = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE timestamp = ?1 AND new = 0")?;
-        let mut query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1")?;
+        let mut query_modified = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE timestamp = ?1 AND new = 0;")?;
+        let mut query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1;")?;
 
-        let file: File = File::create(path).expect("Error opening the output file");
-        let mut writer = BufWriter::with_capacity(32 * 1024 * 1024, file);
+        let mut file = create_file("output.txt").expect("Error creating file");
 
-        let new_rows = query_new.query_map([], |row| {
+        let mut table_builder = Builder::default();
+        table_builder.push_record(vec!["PATH", "SIZE", "CREATED", "MODIFIED", "PLEN", "FLEN"]);
+
+        let max = *[
+            query_new_count.query_one([], |row| row.get::<_, i64>(0))?,
+            query_modified_count.query_one([timestamp], |row| row.get::<_, i64>(0))?,
+            query_deleted_count.query_one([timestamp], |row| row.get::<_, i64>(0))?,
+        ]
+        .iter()
+        .max()
+        .unwrap() as usize;
+
+        let mut chunk_size = 100_000 as usize;
+
+        if max < chunk_size {
+            chunk_size = max;
+        }
+
+        println!("CHUNK SIZE: {}", chunk_size);
+
+        let mut rows_new = query_new.query([])?;
+        let mut rows_modified = query_modified.query([timestamp])?;
+        let mut rows_deleted = query_deleted.query([timestamp])?;
+
+        /*let new_rows = query_new.query_map([], |row| {
             Ok(Datei {
                 path: row.get::<_, String>("path")?,
                 size: row.get::<_, i64>("size")?,
@@ -102,10 +152,10 @@ fn write_to_file(connection: &mut Connection, path: &str) -> Result<()> {
         table
             .with(Style::psql())
             .with(Modify::new(Rows::first()).with(Format::content(|s| s.to_uppercase())));
-        
-        writeln!(writer, "{}", table).expect("ERROR");
 
-        writer.flush().expect("Writer flush error");
+        writeln!(writer, "{}", table).expect("ERROR");*/
+
+        file.flush().expect("Writer flush error");
     }
     tx.commit()?;
 
@@ -145,7 +195,7 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/Documents") {
+        for dir_entry in WalkDir::new("/home/simon/Documents/Hallo") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
@@ -195,7 +245,7 @@ fn main() -> Result<()> {
         drop(insert);
         tx.commit()?;
 
-        write_to_file(&mut db, "output.txt")?;
+        write_to_file(&mut db, "output.txt", timestamp)?;
 
         db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
@@ -204,4 +254,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-
