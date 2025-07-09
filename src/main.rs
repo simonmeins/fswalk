@@ -1,15 +1,12 @@
+use chrono::{Local, TimeZone};
 use jwalk::WalkDir;
-use rusqlite::{params, Connection, Result, Row, Rows};
+use rusqlite::{Connection, Result, Row, Rows, params};
 use std::{
     fs::File,
     io::{BufWriter, Write},
     ops::Deref,
 };
-use tabled::{
-    Table, Tabled,
-    builder::Builder,
-    settings::Style
-};
+use tabled::{Table, Tabled, builder::Builder, settings::Style};
 use xxhash_rust::xxh3::xxh3_64;
 
 #[derive(Debug, Tabled)]
@@ -92,26 +89,45 @@ fn process_row(row: &Row) -> Datei {
     }
 }
 
-fn build_table(mut rows: Rows) -> Result<Table> {
+fn build_table(mut rows: Rows) -> Result<Option<Table>> {
     let mut table_builder = Builder::default();
     table_builder.push_record(vec!["PATH", "SIZE", "CREATED", "MODIFIED", "PLEN", "FLEN"]);
 
+    let mut found = false;
+
     while let Some(row) = rows.next()? {
+        found = true;
         let datei = process_row(&row);
+
+        let created = Local
+            .timestamp_opt(datei.created, 0)
+            .unwrap()
+            .format("%d.%m.%Y %H:%M:%S")
+            .to_string();
+        let modified = Local
+            .timestamp_opt(datei.modified, 0)
+            .unwrap()
+            .format("%d.%m.%Y %H:%M:%S")
+            .to_string();
+
         table_builder.push_record(vec![
             datei.path,
             datei.size.to_string(),
-            datei.created.to_string(),
-            datei.modified.to_string(),
+            created,
+            modified,
             datei.plen.to_string(),
-            datei.flen.to_string()
+            datei.flen.to_string(),
         ]);
+    }
+
+    if !found {
+        return Ok(None);
     }
 
     let mut table = table_builder.build();
     table.with(Style::psql());
 
-    Ok(table)
+    Ok(Some(table))
 }
 
 fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Result<()> {
@@ -140,25 +156,7 @@ fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Res
         let t1 = build_table(query_rows_modified)?;
         let t2 = build_table(query_rows_deleted)?;
 
-        println!("{}", t1);
-
-        /*let new_rows = query_new.query_map([], |row| {
-            Ok(Datei {
-                path: row.get::<_, String>("path")?,
-                size: row.get::<_, i64>("size")?,
-                created: row.get::<_, i64>("created")?,
-                modified: row.get::<_, i64>("modified")?,
-                plen: row.get::<_, i64>("plen")?,
-                flen: row.get::<_, i64>("flen")?
-            })
-        })?;
-
-        let mut table = Table::new(new_rows.map(Result::unwrap));
-        table
-            .with(Style::psql())
-            .with(Modify::new(Rows::first()).with(Format::content(|s| s.to_uppercase())));*/
-
-        //writeln!(file, "{}", table).expect("ERROR");
+        println!("{}", t1.unwrap());
 
         file.flush().expect("Writer flush error");
     }
@@ -200,33 +198,39 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/home/simon/Documents/Hallo") {
+        for dir_entry in WalkDir::new("/") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
                         continue;
                     }
 
+                    let metadata = entry.metadata();
                     let path = entry.path();
 
                     let hash = xxh3_64(path.to_str().unwrap().as_bytes());
-                    let size = entry.metadata().unwrap().len();
-                    let created = entry
-                        .metadata()
-                        .unwrap()
-                        .created()
-                        .unwrap()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    let modified = entry
-                        .metadata()
-                        .unwrap()
-                        .modified()
-                        .unwrap()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
+
+                    let size = match metadata {
+                        Ok(ref data) => data.len(),
+                        Err(_) => 0,
+                    };
+
+                    let created = match metadata {
+                        Ok(ref data) => match data.created() {
+                            Ok(time) => time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                            Err(_) => 0,
+                        },
+                        Err(_) => 0,
+                    };
+
+                    let modified = match metadata {
+                        Ok(ref data) => match data.modified() {
+                            Ok(time) => time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                            Err(_) => 0,
+                        },
+                        Err(_) => 0,
+                    };
+
                     let plen = path.to_str().unwrap().len();
                     let flen = entry.file_name.len();
 
@@ -246,11 +250,11 @@ fn main() -> Result<()> {
                 Err(_) => (),
             };
         }
-
+        
         drop(insert);
         tx.commit()?;
 
-        write_to_file(&mut db, "output.txt", timestamp)?;
+        //write_to_file(&mut db, "output.txt", timestamp)?;
 
         db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
