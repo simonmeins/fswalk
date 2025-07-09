@@ -1,5 +1,5 @@
 use jwalk::WalkDir;
-use rusqlite::{Connection, Result, Row, params};
+use rusqlite::{params, Connection, Result, Row, Rows};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -8,10 +8,7 @@ use std::{
 use tabled::{
     Table, Tabled,
     builder::Builder,
-    settings::{
-        Alignment, Format, Modify, Style,
-        object::{Rows, Segment},
-    },
+    settings::Style
 };
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -95,47 +92,55 @@ fn process_row(row: &Row) -> Datei {
     }
 }
 
+fn build_table(mut rows: Rows) -> Result<Table> {
+    let mut table_builder = Builder::default();
+    table_builder.push_record(vec!["PATH", "SIZE", "CREATED", "MODIFIED", "PLEN", "FLEN"]);
+
+    while let Some(row) = rows.next()? {
+        let datei = process_row(&row);
+        table_builder.push_record(vec![
+            datei.path,
+            datei.size.to_string(),
+            datei.created.to_string(),
+            datei.modified.to_string(),
+            datei.plen.to_string(),
+            datei.flen.to_string()
+        ]);
+    }
+
+    let mut table = table_builder.build();
+    table.with(Style::psql());
+
+    Ok(table)
+}
+
 fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Result<()> {
     let tx = connection.transaction()?;
 
     {
-        let mut query_new_count = tx.prepare("SELECT COUNT(*) from files WHERE new = 1;")?;
-        let mut query_modified_count =
+        let mut sql_query_new_count = tx.prepare("SELECT COUNT(*) from files WHERE new = 1;")?;
+        let mut sql_query_modified_count =
             tx.prepare("SELECT COUNT(*) FROM files WHERE timestamp = ?1 AND new = 0;")?;
-        let mut query_deleted_count =
+        let mut sql_query_deleted_count =
             tx.prepare("SELECT COUNT(*) FROM files WHERE last_seen <> ?1")?;
 
-        let mut query_new = tx.prepare(
+        let mut sql_query_new = tx.prepare(
             "SELECT hash, path, size, created, modified, plen, flen FROM files WHERE new = 1;",
         )?;
-        let mut query_modified = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE timestamp = ?1 AND new = 0;")?;
-        let mut query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1;")?;
+        let mut sql_query_modified = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE timestamp = ?1 AND new = 0;")?;
+        let mut sql_query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1;")?;
 
         let mut file = create_file("output.txt").expect("Error creating file");
 
-        let mut table_builder = Builder::default();
-        table_builder.push_record(vec!["PATH", "SIZE", "CREATED", "MODIFIED", "PLEN", "FLEN"]);
+        let query_rows_new = sql_query_new.query([])?;
+        let query_rows_modified = sql_query_modified.query([timestamp])?;
+        let query_rows_deleted = sql_query_deleted.query([timestamp])?;
 
-        let max = *[
-            query_new_count.query_one([], |row| row.get::<_, i64>(0))?,
-            query_modified_count.query_one([timestamp], |row| row.get::<_, i64>(0))?,
-            query_deleted_count.query_one([timestamp], |row| row.get::<_, i64>(0))?,
-        ]
-        .iter()
-        .max()
-        .unwrap() as usize;
+        let t = build_table(query_rows_new)?;
+        let t1 = build_table(query_rows_modified)?;
+        let t2 = build_table(query_rows_deleted)?;
 
-        let mut chunk_size = 100_000 as usize;
-
-        if max < chunk_size {
-            chunk_size = max;
-        }
-
-        println!("CHUNK SIZE: {}", chunk_size);
-
-        let mut rows_new = query_new.query([])?;
-        let mut rows_modified = query_modified.query([timestamp])?;
-        let mut rows_deleted = query_deleted.query([timestamp])?;
+        println!("{}", t1);
 
         /*let new_rows = query_new.query_map([], |row| {
             Ok(Datei {
@@ -151,9 +156,9 @@ fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Res
         let mut table = Table::new(new_rows.map(Result::unwrap));
         table
             .with(Style::psql())
-            .with(Modify::new(Rows::first()).with(Format::content(|s| s.to_uppercase())));
+            .with(Modify::new(Rows::first()).with(Format::content(|s| s.to_uppercase())));*/
 
-        writeln!(writer, "{}", table).expect("ERROR");*/
+        //writeln!(file, "{}", table).expect("ERROR");
 
         file.flush().expect("Writer flush error");
     }
