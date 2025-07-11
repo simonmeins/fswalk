@@ -1,16 +1,16 @@
 use chrono::{Local, TimeZone};
-use jwalk::WalkDir;
+use jwalk::{DirEntry, WalkDir};
 use rusqlite::{Connection, Result, Row, Rows, params};
 use std::{
     fs::File,
     io::{BufWriter, Write},
-    ops::Deref,
 };
-use tabled::{Table, Tabled, builder::Builder, settings::Style};
+use tabled::{Table, builder::Builder, settings::Style};
 use xxhash_rust::xxh3::xxh3_64;
 
-#[derive(Debug, Tabled)]
+#[derive(Debug)]
 struct Datei {
+    hash: String,
     path: String,
     size: i64,
     created: i64,
@@ -74,12 +74,17 @@ fn create_index(connection: &Connection) {
 }
 
 fn create_file(path: &str) -> std::io::Result<BufWriter<File>> {
-    let file = File::create(path)?;
+    let now = Local::now();
+
+    let filename = format!("Krose_{}.txt", now.format("%Y%m%d_%H%M%S"));
+
+    let file = File::create(filename)?;
     Ok(BufWriter::with_capacity(32 * 1024 * 1024, file))
 }
 
 fn process_row(row: &Row) -> Datei {
     Datei {
+        hash: row.get_unwrap::<_, String>("hash"),
         path: row.get_unwrap::<_, String>("path"),
         size: row.get_unwrap::<_, i64>("size"),
         created: row.get_unwrap::<_, i64>("created"),
@@ -91,7 +96,7 @@ fn process_row(row: &Row) -> Datei {
 
 fn build_table(mut rows: Rows) -> Result<Option<Table>> {
     let mut table_builder = Builder::default();
-    table_builder.push_record(vec!["PATH", "SIZE", "CREATED", "MODIFIED", "PLEN", "FLEN"]);
+    table_builder.push_record(vec!["SIZE", "CREATED", "MODIFIED", "PLEN", "FLEN", "PATH"]);
 
     let mut found = false;
 
@@ -111,12 +116,12 @@ fn build_table(mut rows: Rows) -> Result<Option<Table>> {
             .to_string();
 
         table_builder.push_record(vec![
-            datei.path,
             datei.size.to_string(),
             created,
             modified,
             datei.plen.to_string(),
             datei.flen.to_string(),
+            datei.path,
         ]);
     }
 
@@ -134,12 +139,15 @@ fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Res
     let tx = connection.transaction()?;
 
     {
-        let mut sql_query_new_count = tx.prepare("SELECT COUNT(*) from files WHERE new = 1;")?;
+        /*let mut sql_query_new_count = tx.prepare("SELECT COUNT(*) from files WHERE new = 1;")?;
         let mut sql_query_modified_count =
             tx.prepare("SELECT COUNT(*) FROM files WHERE timestamp = ?1 AND new = 0;")?;
         let mut sql_query_deleted_count =
-            tx.prepare("SELECT COUNT(*) FROM files WHERE last_seen <> ?1")?;
+            tx.prepare("SELECT COUNT(*) FROM files WHERE last_seen <> ?1")?;*/
 
+        let mut sql_query_total_files_space =
+            tx.prepare("SELECT round(SUM(size) / 1000000000.0, 2) FROM files;")?;
+        let mut sql_query_total_files_count = tx.prepare("SELECT COUNT(*) FROM files;")?;
         let mut sql_query_new = tx.prepare(
             "SELECT hash, path, size, created, modified, plen, flen FROM files WHERE new = 1;",
         )?;
@@ -148,21 +156,92 @@ fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Res
 
         let mut file = create_file("output.txt").expect("Error creating file");
 
+        let query_total_files_space =
+            sql_query_total_files_space.query_one([], |row| Ok(row.get::<_, f64>(0)?))?;
+        let query_total_files_count =
+            sql_query_total_files_count.query_one([], |row| Ok(row.get::<_, i64>(0)?))?;
         let query_rows_new = sql_query_new.query([])?;
         let query_rows_modified = sql_query_modified.query([timestamp])?;
         let query_rows_deleted = sql_query_deleted.query([timestamp])?;
 
-        let t = build_table(query_rows_new)?;
-        let t1 = build_table(query_rows_modified)?;
-        let t2 = build_table(query_rows_deleted)?;
+        let table_new_files = build_table(query_rows_new)?;
+        let table_modified_files = build_table(query_rows_modified)?;
+        let table_deleted_files = build_table(query_rows_deleted)?;
 
-        println!("{}", t1.unwrap());
+        writeln!(
+            file,
+            "Anzahl Dateien: {}\nSpeicherplatz belegt: {} GB\n\n",
+            query_total_files_count, query_total_files_space
+        )
+        .expect("Error while writing total files count");
+
+        if let Some(table_new) = table_new_files {
+            writeln!(file, "Neue Dateien:\n\n{}\n\n", table_new)
+                .expect("Error while writing new files to file");
+        }
+
+        if let Some(table_modified) = table_modified_files {
+            writeln!(file, "Geänderte Dateien:\n\n{}\n\n", table_modified)
+                .expect("Error while writing modified files to file");
+        }
+
+        if let Some(table_deleted) = table_deleted_files {
+            writeln!(file, "Gelöschte Dateien:\n\n{}", table_deleted)
+                .expect("Error while writing deleted files to file");
+        }
 
         file.flush().expect("Writer flush error");
     }
     tx.commit()?;
 
     Ok(())
+}
+
+fn process_dir_entry(entry: &DirEntry<((), ())>) -> Result<Datei> {
+    let metadata = entry.metadata();
+    let path = entry.path();
+
+    let hash = xxh3_64(path.to_str().unwrap().as_bytes()).to_string();
+
+    let size = match metadata {
+        Ok(ref data) => data.len(),
+        Err(_) => 0,
+    } as i64;
+
+    let created = match metadata {
+        Ok(ref data) => match data.created() {
+            Ok(time) => time
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    } as i64;
+
+    let modified = match metadata {
+        Ok(ref data) => match data.modified() {
+            Ok(time) => time
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    } as i64;
+
+    let plen = path.to_str().unwrap().len() as i64;
+    let flen = entry.file_name.len() as i64;
+
+    Ok(Datei {
+        hash: hash,
+        path: path.to_str().unwrap().to_string(),
+        size: size,
+        created: created,
+        modified: modified,
+        plen: plen,
+        flen: flen,
+    })
 }
 
 fn main() -> Result<()> {
@@ -198,50 +277,23 @@ fn main() -> Result<()> {
             .unwrap()
             .as_secs();
 
-        for dir_entry in WalkDir::new("/") {
+        for dir_entry in WalkDir::new("/home/simon/") {
             match dir_entry {
                 Ok(entry) => {
                     if !entry.file_type().is_file() {
                         continue;
                     }
 
-                    let metadata = entry.metadata();
-                    let path = entry.path();
-
-                    let hash = xxh3_64(path.to_str().unwrap().as_bytes());
-
-                    let size = match metadata {
-                        Ok(ref data) => data.len(),
-                        Err(_) => 0,
-                    };
-
-                    let created = match metadata {
-                        Ok(ref data) => match data.created() {
-                            Ok(time) => time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-                            Err(_) => 0,
-                        },
-                        Err(_) => 0,
-                    };
-
-                    let modified = match metadata {
-                        Ok(ref data) => match data.modified() {
-                            Ok(time) => time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-                            Err(_) => 0,
-                        },
-                        Err(_) => 0,
-                    };
-
-                    let plen = path.to_str().unwrap().len();
-                    let flen = entry.file_name.len();
+                    let datei = process_dir_entry(&entry)?;
 
                     insert.execute(params![
-                        hash.to_string(),
-                        path.to_str(),
-                        size,
-                        created,
-                        modified,
-                        plen,
-                        flen,
+                        datei.hash,
+                        datei.path,
+                        datei.size,
+                        datei.created,
+                        datei.modified,
+                        datei.plen,
+                        datei.flen,
                         timestamp,
                         timestamp,
                         1
@@ -250,11 +302,11 @@ fn main() -> Result<()> {
                 Err(_) => (),
             };
         }
-        
+
         drop(insert);
         tx.commit()?;
 
-        //write_to_file(&mut db, "output.txt", timestamp)?;
+        write_to_file(&mut db, "output.txt", timestamp)?;
 
         db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
