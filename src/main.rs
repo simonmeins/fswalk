@@ -73,7 +73,7 @@ fn create_index(connection: &Connection) {
         .expect("INDEX ERROR ON NEW");
 }
 
-fn create_file(path: &str) -> std::io::Result<BufWriter<File>> {
+fn create_file() -> std::io::Result<BufWriter<File>> {
     let now = Local::now();
 
     let filename = format!("Krose_{}.txt", now.format("%Y%m%d_%H%M%S"));
@@ -135,7 +135,7 @@ fn build_table(mut rows: Rows) -> Result<Option<Table>> {
     Ok(Some(table))
 }
 
-fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Result<()> {
+fn write_to_file(connection: &mut Connection, timestamp: u64) -> Result<()> {
     let tx = connection.transaction()?;
 
     {
@@ -154,7 +154,7 @@ fn write_to_file(connection: &mut Connection, path: &str, timestamp: u64) -> Res
         let mut sql_query_modified = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE timestamp = ?1 AND new = 0;")?;
         let mut sql_query_deleted = tx.prepare("SELECT hash, path, size, created, modified, plen, flen FROM files WHERE last_seen <> ?1;")?;
 
-        let mut file = create_file("output.txt").expect("Error creating file");
+        let mut file = create_file().expect("Error creating file");
 
         let query_total_files_space =
             sql_query_total_files_space.query_one([], |row| Ok(row.get::<_, f64>(0)?))?;
@@ -306,7 +306,7 @@ fn main() -> Result<()> {
         drop(insert);
         tx.commit()?;
 
-        write_to_file(&mut db, "output.txt", timestamp)?;
+        write_to_file(&mut db, timestamp)?;
 
         db.execute("DELETE FROM files WHERE last_seen <> ?1", [timestamp])?;
     }
